@@ -103,11 +103,10 @@ class DocumentDataMixin(ProxyBase):
             self[key] = val
 
     def __contains__(self, key):
-        try:
-            a=self[key]
-            return True
-        except KeyError:
-            return False
+        if hasattr(self._document, key):
+            return getattr(self._document, key) is not None
+        else:
+            return self._data.get(key) is not None
 
     def __getitem__(self, key):
         res = None
@@ -444,6 +443,7 @@ class Exchange(DocumentDataMixin, ExchangeProxyBase):
 
         for key, value in dict_as_exchangedataset(self.as_dict()).items():
             setattr(self._document, key, value)
+
         self._document.save()
 
     @writable_project

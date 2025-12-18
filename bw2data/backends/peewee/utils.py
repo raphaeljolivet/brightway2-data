@@ -39,6 +39,7 @@ def dict_as_exchangedataset(ds):
     ds["output_database"] = output[0] if output else ds["output_database"]
     ds["input_code"] = input[1] if input else ds["input_code"]
     ds["output_code"] = output[1] if output else ds["output_code"]
+    ds["uncertainty_type"] = ds.pop("uncertainty type", None)
 
     return generic_dict_as_dataset(ds, ExchangeDataset)
 

@@ -431,12 +431,12 @@ Use a raw SQLite3 cursor instead of Peewee for a ~2 times speed advantage.
         SQL = """
             SELECT
                 amount,
-                json_extract(data, '$.scale') as scale,
-                json_extract(data, '$.shape') as shape,
-                json_extract(data, '$.minimum') as minimum,
-                json_extract(data, '$.maximum') as maximum,
-                json_extract(data, '$.uncertainty_type') as uncertainty_type,
-                json_extract(data, '$.loc') as loc,
+                scale,
+                shape,
+                minimum,
+                maximum,
+                uncertainty_type,
+                loc,
                 type,
                 input_database, 
                 input_code, 
