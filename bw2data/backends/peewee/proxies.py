@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import print_function, unicode_literals
+
+from bw2data.proxies import ProxyBase
 from eight import *
+from peewee import Model
+from playhouse.shortcuts import model_to_dict
 
 from . import sqlite3_lci_db
 from ... import databases, mapping, geomapping, config
@@ -83,21 +87,74 @@ class Exchanges(Iterable):
         return self._get_queryset().count()
 
 
-class Activity(ActivityProxyBase):
+class DocumentDataMixin(ProxyBase):
+    """Common mixin for object looking first within _document then in _data"""
+
+
+    def __init__(self, document, **kwargs):
+        self._document = document
+
+        if document.data is None :
+            document.data = {}
+
+        self._data = document.data
+
+        for key, val in kwargs.items():
+            self[key] = val
+
+    def __contains__(self, key):
+        try:
+            a=self[key]
+            return True
+        except KeyError:
+            return False
+
+    def __getitem__(self, key):
+        res = None
+        if hasattr(self._document, key) :
+            res = getattr(self._document, key)
+        elif key in self._data:
+            res = self._data.get(key)
+        if res is None:
+            raise KeyError
+        return res
+
+    def __setitem__(self, key, value):
+        if hasattr(self._document, key) :
+            setattr(self._document, key, value)
+        else:
+            if key != "data" :
+                self._data[key] = value
+
+    def __delitem__(self, key):
+        if hasattr(self._document, key) :
+            raise ValueError(f"Cannot delete attribute {key}")
+        else:
+            del self._data[key]
+
+    def __len__(self):
+        return len(self.as_dict())
+
+    def as_dict(self):
+        res = super().as_dict().copy()
+        res.update(model_to_dict(self._document))
+        return res
+
+
+
+class Activity(DocumentDataMixin, ActivityProxyBase):
     def __init__(self, document=None, **kwargs):
         """Create an `Activity` proxy object.
 
         If this is a new activity, can pass `kwargs`.
 
         If the activity exists in the database, `document` should be an `ActivityDataset`."""
+
         if document is None:
-            self._document = ActivityDataset()
-            self._data = kwargs
-        else:
-            self._document = document
-            self._data = self._document.data
-            self._data['code'] = self._document.code
-            self._data['database'] = self._document.database
+            document = ActivityDataset()
+
+        super().__init__(document=document, **kwargs)
+
 
     def __setitem__(self, key, value):
         if key == 'code' and 'code' in self._data:
@@ -107,20 +164,21 @@ class Activity(ActivityProxyBase):
             self._change_database(value)
             print("Successfully switch activity dataset to database `{}`".format(value))
         else:
-            super(Activity, self).__setitem__(key, value)
+            super().__setitem__(key, value)
 
     def __getitem__(self, key):
         if key == 0:
             return self["database"]
         elif key == 1:
             return self["code"]
-        elif key in self._data:
-            return self._data[key]
+        elif key in self:
+            return super().__getitem__(key)
 
         try:
             rp = self.rp_exchange()
         except ValueError:
             raise KeyError
+
 
         if key in rp.get('classifications', []):
             return rp['classifications'][key]
@@ -147,7 +205,7 @@ class Activity(ActivityProxyBase):
             ).execute()
         except ActivityParameter.DoesNotExist:
             pass
-        IndexManager(Database(self['database']).filename).delete_dataset(self._data)
+        IndexManager(Database(self['database']).filename).delete_dataset(self.as_dict())
         self.exchanges().delete()
         self._document.delete_instance()
         self = None
@@ -164,7 +222,7 @@ class Activity(ActivityProxyBase):
 
         databases.set_dirty(self['database'])
 
-        for key, value in dict_as_activitydataset(self._data).items():
+        for key, value in dict_as_activitydataset(self.as_dict()).items():
             setattr(self._document, key, value)
         self._document.save()
 
@@ -174,7 +232,7 @@ class Activity(ActivityProxyBase):
             geomapping.add([self['location']])
 
         if databases[self['database']].get('searchable', True):
-            IndexManager(Database(self['database']).filename).update_dataset(self._data)
+            IndexManager(Database(self['database']).filename).update_dataset(self.as_dict())
 
     def _change_code(self, new_code):
         if self['code'] == new_code:
@@ -285,7 +343,7 @@ class Activity(ActivityProxyBase):
         candidates = list(self.production())
         if len(candidates) == 1:
             return candidates[0]
-        candidates2 = [exc for exc in candidates if exc.input._data.get('name') == self._data.get('reference product')]
+        candidates2 = [exc for exc in candidates if exc.input['name'] == self['reference product']]
         if len(candidates2) == 1:
             return candidates2[0]
         else:
@@ -313,11 +371,11 @@ class Activity(ActivityProxyBase):
             activity[key] = value
         for k, v in kwargs.items():
             activity._data[k] = v
-        activity._data[u'code'] = str(code or uuid.uuid4().hex)
+        activity[u'code'] = str(code or uuid.uuid4().hex)
         activity.save()
 
         for exc in self.exchanges():
-            data = copy.deepcopy(exc._data)
+            data = exc.as_dict()
             data['output'] = activity.key
             # Change `input` for production exchanges
             if exc['input'] == exc['output']:
@@ -326,21 +384,53 @@ class Activity(ActivityProxyBase):
         return activity
 
 
-class Exchange(ExchangeProxyBase):
+class Exchange(DocumentDataMixin, ExchangeProxyBase):
     def __init__(self, document=None, **kwargs):
         """Create an `Exchange` proxy object.
 
         If this is a new exchange, can pass `kwargs`.
 
         If the exchange exists in the database, `document` should be an `ExchangeDataset`."""
+
         if document is None:
-            self._document = ExchangeDataset()
-            self._data = kwargs
+            document = ExchangeDataset()
+
+        super().__init__(document=document, **kwargs)
+
+    def __getitem__(self, key):
+        """Get onput / output keys from the attribute of the peewee document"""
+        if key in ["input", "output"] :
+            if self[f"{key}_database"] is None and self[f"{key}_code"] is None:
+                return None
+            return (self[f"{key}_database"], self[f"{key}_code"])
+
+        return super().__getitem__(key)
+
+    def __setitem__(self, key, value):
+        """Unwrapp input / output key tuple into proper attributes of the Peewee document"""
+        if key in ['input', 'output'] :
+            self[f"{key}_database"], self[f"{key}_code"] = value
         else:
-            self._document = document
-            self._data = self._document.data
-            self._data['input'] = (self._document.input_database, self._document.input_code)
-            self._data['output'] = (self._document.output_database, self._document.output_code)
+            super().__setitem__(key, value)
+
+    def _set_output(self, value):
+        """Override the one from `ExchangeProxyBase`"""
+        if isinstance(value, ActivityProxyBase):
+            self._output = value
+            self['output'] = value.key
+        elif isinstance(value, (tuple, list)):
+            self['output'] = value
+        else:
+            raise ValueError("Provided input data is invalid")
+
+    output = property(ExchangeProxyBase._get_output, _set_output)
+
+    def as_dict(self):
+        res = super().as_dict()
+        res["input"] = self["input"]
+        res["output"] = self["output"]
+        return res
+
 
     @writable_project
     def save(self):
@@ -352,7 +442,7 @@ class Exchange(ExchangeProxyBase):
 
         databases.set_dirty(self['output'][0])
 
-        for key, value in dict_as_exchangedataset(self._data).items():
+        for key, value in dict_as_exchangedataset(self.as_dict()).items():
             setattr(self._document, key, value)
         self._document.save()
 

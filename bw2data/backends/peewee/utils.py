@@ -1,47 +1,47 @@
 # -*- coding: utf-8 -*-
 from __future__ import print_function, unicode_literals
+
+from bw2data.backends.peewee import ActivityDataset, ExchangeDataset
 from eight import *
 
 from ...method import Method
 from ...meta import methods
 
 
-def dict_as_activitydataset(ds):
-    return {
-        "data": ds,
-        "database": ds["database"],
-        "code": ds["code"],
-        "location": ds.get("location"),
-        "name": ds.get("name"),
-        "product": ds.get("reference product"),
-        "type": ds.get("type", "process"),
+def generic_dict_as_dataset(ds, model_class) :
+    res = {
+      key:ds.get(key, None) for key in model_class._meta.fields if key != "id"
     }
+
+    # Other data
+    data = {
+      key:ds.get(key, None) for key, vak in ds.items() if key not in  model_class._meta.fields
+    }
+
+    res["data"] = data
+    return res
+
+def dict_as_activitydataset(ds):
+    """Distribute values between known attributes and 'data' metadata """
+    ds = ds.copy()
+    ds["product"] = ds.pop("reference product", None)
+    return generic_dict_as_dataset(ds, ActivityDataset)
+
 
 
 def dict_as_exchangedataset(ds):
-    return {
-        "data": ds,
-        "input_database": ds['input'][0],
-        "input_code": ds['input'][1],
-        "output_database": ds['output'][0],
-        "output_code": ds['output'][1],
-        "type": ds['type']
-    }
+    ds = ds.copy()
 
+    input = ds.pop("input", None)
+    output = ds.pop("output", None)
 
-# def replace_exchanges(old_key, new_key):
-#     """Replace ``old_key`` with ``new_key`` in input field of exchanges.
+    ds["input_database"] = input[0] if input else ds["input_database"]
+    ds["output_database"] = output[0] if output else ds["output_database"]
+    ds["input_code"] = input[1] if input else ds["input_code"]
+    ds["output_code"] = output[1] if output else ds["output_code"]
 
-#     Returns number of modified exchanges."""
-#     from .proxies import Exchanges
+    return generic_dict_as_dataset(ds, ExchangeDataset)
 
-#     # reverse means search by input field, not output field of exchange
-#     for index, exc in enumerate(Exchanges(old_key, reverse=True)):
-#         exc["input"] = new_key
-#         exc.save()
-#     else:
-#         return 0
-#     return index + 1
 
 
 def replace_cfs(old_key, new_key):

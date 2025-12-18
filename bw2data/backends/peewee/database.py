@@ -21,10 +21,7 @@ import pyprind
 import random
 import sqlite3
 import warnings
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
+
 
 
 # AD = ActivityDataset
@@ -34,6 +31,8 @@ except ImportError:
 
 _VALID_KEYS = {'location', 'name', 'product', 'type'}
 
+
+print("XXXXX Good BW2DATA  XXXXX")
 
 class SQLiteBackend(LCIBackend):
     backend = "sqlite"
@@ -274,7 +273,7 @@ class SQLiteBackend(LCIBackend):
 
     def load(self, *args, **kwargs):
         # Should not be used, in general; relatively slow
-        activities = [obj['data'] for obj in
+        activities = [obj for obj in
             self._get_queryset().dicts()
         ]
 
@@ -427,45 +426,67 @@ Use a raw SQLite3 cursor instead of Peewee for a ~2 times speed advantage.
 
         # Using raw sqlite3 to retrieve data for ~2x speed boost
         connection = sqlite3.connect(sqlite3_lci_db._filepath)
+        connection.row_factory = sqlite3.Row
         cursor = connection.cursor()
-        SQL = "SELECT data, input_database, input_code, output_database, output_code FROM exchangedataset WHERE output_database = ?"
+        SQL = """
+            SELECT
+                amount,
+                json_extract(data, '$.scale') as scale,
+                json_extract(data, '$.shape') as shape,
+                json_extract(data, '$.minimum') as minimum,
+                json_extract(data, '$.maximum') as maximum,
+                json_extract(data, '$.uncertainty_type') as uncertainty_type,
+                json_extract(data, '$.loc') as loc,
+                type,
+                input_database, 
+                input_code, 
+                output_database, 
+                output_code FROM exchangedataset WHERE output_database = ?
+        """
 
         dependents = set()
         found_exchanges = False
 
         for index, row in enumerate(cursor.execute(SQL, (self.name,))):
-            data, input_database, input_code, output_database, output_code = row
-            data = pickle.loads(bytes(data))
 
-            if "type" not in data:
+            def row_float(key, default=np.NaN):
+                res = row[key]
+                return default if res is None else float(res)
+
+            input_database = row["input_database"]
+            input_code = row["input_code"]
+            output_database = row["output_database"]
+            output_code = row["output_code"]
+            type = row["type"]
+            amount = row["amount"]
+
+            if type is None:
                 raise UntypedExchange
-            if "amount" not in data or "input" not in data:
+            if amount is None :
                 raise InvalidExchange
-            if np.isnan(data['amount']) or np.isinf(data['amount']):
-                raise ValueError("Invalid amount in exchange {}".format(data))
+            if np.isnan(amount) or np.isinf(amount):
+                raise ValueError("Invalid amount in exchange {}".format(amount))
 
             found_exchanges = True
 
             dependents.add(input_database)
 
+            uncertainty_type = row_float("uncertainty_type", 0)
             try:
                 arr[index] = (
                     mapping[(input_database, input_code)],
                     mapping[(output_database, output_code)],
                     MAX_INT_32,
                     MAX_INT_32,
-                    TYPE_DICTIONARY[data["type"]],
-                    data.get("uncertainty type", 0),
-                    data["amount"],
-                    data["amount"] \
-                        if data.get("uncertainty type", 0) in (0,1) \
-                        else data.get("loc", np.NaN),
-                    data.get("scale", np.NaN),
-                    data.get("shape", np.NaN),
-                    data.get("minimum", np.NaN),
-                    data.get("maximum", np.NaN),
-                    data["amount"] < 0
-                )
+                    TYPE_DICTIONARY[type],
+                    uncertainty_type,
+                    amount,
+                    amount if uncertainty_type in (0,1) else row_float("loc"),
+                    row_float("scale"),
+                    row_float("shape"),
+                    row_float("minimum"),
+                    row_float("maximum"),
+                    amount < 0)
             except KeyError:
                 raise UnknownObject(("Exchange between {} and {} is invalid "
                     "- one of these objects is unknown (i.e. doesn't exist "
