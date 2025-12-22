@@ -1,14 +1,14 @@
 from functools import cache
 
 from peewee import DoesNotExist, TextField
+from playhouse.sqlite_ext import JSONField
 
 from bw2data.errors import UnknownObject
 from bw2data.snowflake_ids import SnowflakeIDBaseClass
-from bw2data.sqlite import PickleField
 
 
 class ActivityDataset(SnowflakeIDBaseClass):
-    data = PickleField()  # Canonical, except for other C fields
+    data = JSONField()  # Canonical, except for other C fields
     code = TextField()  # Canonical
     database = TextField()  # Canonical
     location = TextField(null=True)  # Reset from `data`
@@ -22,7 +22,7 @@ class ActivityDataset(SnowflakeIDBaseClass):
 
 
 class ExchangeDataset(SnowflakeIDBaseClass):
-    data = PickleField()  # Canonical, except for other C fields
+    data = JSONField()  # Canonical, except for other C fields
     input_code = TextField()  # Canonical
     input_database = TextField()  # Canonical
     output_code = TextField()  # Canonical
