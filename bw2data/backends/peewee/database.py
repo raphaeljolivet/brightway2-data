@@ -159,7 +159,7 @@ class SQLiteBackend(LCIBackend):
             exchanges.append(dict_as_exchangedataset(exchange))
 
             # Query gets passed as INSERT INTO x VALUES ('?', '?'...)
-            # SQLite3 has a limit of 999 variables,
+            # SQLite3 has a limit of 999 variables,peewee
             # So 6 fields * 125 is under the limit
             # Otherwise get the following:
             # peewee.OperationalError: too many SQL variables

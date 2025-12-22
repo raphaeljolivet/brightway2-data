@@ -444,6 +444,9 @@ class Exchange(DocumentDataMixin, ExchangeProxyBase):
         for key, value in dict_as_exchangedataset(self.as_dict()).items():
             setattr(self._document, key, value)
 
+        # Save ids
+        #self._document.input_id = self.input["id"]
+        #self._document.output_id = self.output["id"]
         self._document.save()
 
     @writable_project
