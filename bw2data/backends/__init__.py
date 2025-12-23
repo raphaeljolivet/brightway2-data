@@ -3,7 +3,7 @@ import os
 from bw2data import config
 from bw2data.project import projects
 from bw2data.sqlite import SubstitutableDatabase
-from bw2data.backends.schema import ActivityDataset, ExchangeDataset, get_id
+from bw2data.backends.schema import ActivityDataset, ExchangeDataset, get_id, DatabaseEnum, LocationEnum, UnitEnum, TypeEnum
 
 sqlite3_lci_db = SubstitutableDatabase(
     projects.dir / "lci" / "databases.db",

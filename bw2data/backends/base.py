@@ -18,7 +18,7 @@ from tqdm import tqdm
 from bw2data import calculation_setups, config, databases, geomapping
 from bw2data.backends import sqlite3_lci_db
 from bw2data.backends.proxies import Activity
-from bw2data.backends.schema import ActivityDataset, ExchangeDataset, get_id, insert_many_activities, insert_many_exchanges
+from bw2data.backends.schema import ActivityDataset, ExchangeDataset, get_id, insert_many_exchanges, insert_many_activities
 from bw2data.backends.typos import (
     check_activity_keys,
     check_activity_type,
