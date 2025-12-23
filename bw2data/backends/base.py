@@ -18,7 +18,7 @@ from tqdm import tqdm
 from bw2data import calculation_setups, config, databases, geomapping
 from bw2data.backends import sqlite3_lci_db
 from bw2data.backends.proxies import Activity
-from bw2data.backends.schema import ActivityDataset, ExchangeDataset, get_id
+from bw2data.backends.schema import ActivityDataset, ExchangeDataset, get_id, insert_many_activities, insert_many_exchanges
 from bw2data.backends.typos import (
     check_activity_keys,
     check_activity_type,
@@ -62,7 +62,9 @@ def get_technosphere_qs(database_name: str, edge_types: Iterable[str]) -> Iterab
     Target = ActivityDataset.alias()
     return (
         ExchangeDataset.select(
-            ExchangeDataset.data,
+            ExchangeDataset.type,
+            ExchangeDataset.amount,
+            ExchangeDataset.uncertainty_type,
             Source.id,
             Target.id,
             ExchangeDataset.input_database,
@@ -105,45 +107,12 @@ get_technosphere_negative_qs = partial(
     get_technosphere_qs, edge_types=labels.technosphere_negative_edge_types
 )
 
+get_biosphere_qs = partial(
+    get_technosphere_qs, edge_types=labels.biosphere_edge_types
+)
 
-def get_biosphere_qs(database_name: str) -> Iterable:
-    Source = ActivityDataset.alias()
-    Target = ActivityDataset.alias()
-    return (
-        ExchangeDataset.select(
-            ExchangeDataset.data,
-            Source.id,
-            Target.id,
-            ExchangeDataset.input_database,
-            ExchangeDataset.input_code,
-            ExchangeDataset.output_database,
-            ExchangeDataset.output_code,
-        )
-        .join(
-            Source,
-            join_type=JOIN.LEFT_OUTER,
-            on=(
-                (ExchangeDataset.input_code == Source.code)
-                & (ExchangeDataset.input_database == Source.database)
-            ),
-        )
-        .switch(ExchangeDataset)
-        .join(
-            Target,
-            join_type=JOIN.LEFT_OUTER,
-            on=(
-                (ExchangeDataset.output_code == Target.code)
-                & (ExchangeDataset.output_database == Target.database)
-            ),
-        )
-        .where(
-            (ExchangeDataset.output_database == database_name)
-            & (ExchangeDataset.type << labels.biosphere_edge_types)
-            & (Target.type << labels.process_node_types)
-        )
-        .tuples()
-        .iterator()
-    )
+
+
 
 
 class SQLiteBackend(ProcessedDataStore):
@@ -622,7 +591,7 @@ class SQLiteBackend(ProcessedDataStore):
             # Otherwise get the following:
             # peewee.OperationalError: too many SQL variables
             if len(exchanges) > 125:
-                ExchangeDataset.insert_many(exchanges).execute()
+                insert_many_exchanges(exchanges)
                 exchanges = []
 
         ds = {k: v for k, v in ds.items() if k != "exchanges"}
@@ -634,7 +603,7 @@ class SQLiteBackend(ProcessedDataStore):
         activities.append(dict_as_activitydataset(ds, add_snowflake_id=True))
 
         if len(activities) > 125:
-            ActivityDataset.insert_many(activities).execute()
+            insert_many_activities(activities)
             activities = []
 
         return exchanges, activities
@@ -657,9 +626,9 @@ class SQLiteBackend(ProcessedDataStore):
                 )
 
             if activities:
-                ActivityDataset.insert_many(activities).execute()
+                insert_many_activities(activities)
             if exchanges:
-                ExchangeDataset.insert_many(exchanges).execute()
+                insert_many_exchanges(exchanges)
             sqlite3_lci_db.db.commit()
             sqlite3_lci_db.vacuum()
         except:
@@ -961,7 +930,9 @@ Here are the type values usually used for nodes:
         Uses raw sqlite3 to retrieve data for ~2x speed boost."""
         for line in qs_func(self.name):
             (
-                data,
+                type,
+                amount,
+                uncertainty_type,
                 row,
                 col,
                 input_database,
@@ -969,6 +940,17 @@ Here are the type values usually used for nodes:
                 output_database,
                 output_code,
             ) = line
+
+            # This simulate numerical info being nested in 'data'.
+            data=dict(
+                type=type,
+                amount=amount,
+                input=[input_database, input_code],
+                output=[output_database, output_code])
+
+            if uncertainty_type is not None :
+                data["uncertainty_type"] = uncertainty_type
+
             # Modify ``dependents`` in place
             if input_database != output_database:
                 dependents.add(input_database)
