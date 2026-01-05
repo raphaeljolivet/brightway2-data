@@ -11,10 +11,6 @@ class DatabaseEnum(EnumRegistry):
     class Meta:
         table_name = "enum_database"
 
-class LocationEnum(EnumRegistry):
-    class Meta:
-        table_name = "enum_location"
-
 class UnitEnum(EnumRegistry):
     class Meta:
         table_name = "enum_unit"
@@ -28,7 +24,7 @@ class ActivityDataset(SnowflakeIDBaseClass):
     code = TextField()  # Canonical
     database = EnumField(DatabaseEnum)
     unit = EnumField(UnitEnum, null=True)
-    location = EnumField(LocationEnum, null=True)  # Reset from `data`
+    location = TextField(null=True)  # Reset from `data`
     name = TextField(null=True)  # Reset from `data`
     product = TextField(null=True)  # Reset from `data`
     type = EnumField(TypeEnum, null=True)  # Reset from `data`
@@ -53,7 +49,7 @@ class ExchangeDataset(SnowflakeIDBaseClass):
     minimum = FloatField(null=True)
     maximum = FloatField(null=True)
 
-    unit = TextField(null=True)
+    unit = EnumField(UnitEnum, null=True)
 
     name= TextField(null=True)
     input_code = TextField()  # Canonical
