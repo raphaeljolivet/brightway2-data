@@ -646,7 +646,8 @@ class SQLiteBackend(ProcessedDataStore):
         data: Union[dict, list],
         process: bool = True,
         searchable: bool = True,
-        check_typos: bool = True,
+        check_typos: bool = False,
+        compact_codes = False,
         signal: Optional[bool] = None,
     ):
         """Write ``data`` to database.
@@ -1039,9 +1040,9 @@ Here are the type values usually used for nodes:
 
         # Figure out when the production exchanges are implicit
         implicit_production = (
-            {"row": get_id((self.name, x[0])), "amount": 1}
+            {"row": item.id, "amount": 1}
             # Get all codes
-            for x in ActivityDataset.select(ActivityDataset.code)
+            for item in ActivityDataset.select(ActivityDataset.id)
             .where(
                 # Get correct database name
                 ActivityDataset.database == self.name,
@@ -1058,9 +1059,7 @@ Here are the type values usually used for nodes:
                         ExchangeDataset.type << labels.technosphere_positive_edge_types,
                     )
                 ),
-            )
-            .tuples()
-        )
+            ))
 
         dp.add_persistent_vector_from_iterator(
             matrix="technosphere_matrix",
