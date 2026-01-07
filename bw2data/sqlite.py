@@ -2,7 +2,10 @@ import json
 import pickle
 from threading import RLock
 
+from deepdiff.serialization import json_loads
 from peewee import BlobField, SqliteDatabase, TextField, Model, IntegerField, CharField
+import playhouse.sqlite_ext as sqlite
+import orjson
 from bw2data.logs import stdout_feedback_logger
 
 
@@ -58,39 +61,37 @@ def add_enum_tables(tables:list[type[Model]]):
                 res.add(field.registry_model)
     return list(res)
 
-class JSONField(TextField):
-    """Simpler JSON field that doesn't support advanced querying and is human-readable"""
+
+
+class FastJSONField(sqlite.JSONField):
+    """Json field using orjson for faster serialization"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(
+            *args,
+            json_loads=orjson.loads,
+            json_dumps=orjson.dumps,
+            **kwargs)
+
+class ListField(TextField) :
+
+    def __init__(self, separator=";", *args, **kwargs):
+        self.separator = separator
+        super().__init__(*args, **kwargs)
 
     def db_value(self, value):
-        return super().db_value(
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                indent=2,
-                default=lambda x: x.isoformat() if hasattr(x, "isoformat") else x,
-            )
-        )
-
-    def python_value(self, value):
-        return json.loads(value)
-
-
-class TupleJSONField(JSONField):
-    def python_value(self, value):
-        if value is None:
+        if value is None :
             return None
-        data = json.loads(value)
-        if isinstance(data, list):
-            data = tuple(data)
-        return data
+        if not type(value) in [list, tuple]:
+            value = [value]
+        return self.separator.join(value)
 
+    def python_value(self, value):
+        if value is None :
+            return None
+        return value.split(self.separator)
 
-class CleanJSONField(JSONField):
+class CleanJSONField(FastJSONField):
     """JSON Field that deletes unwanted fields before saving to DB"""
-
-    def __init__(self, *args, **kwargs):
-
-        super().__init__(*args, **kwargs)
 
     def setup_model(self, model_class):
         """Called after setup of the model because we can't circular reference a class in construction"""
@@ -109,7 +110,7 @@ class CleanJSONField(JSONField):
         return super().db_value(cleaned)
 
 
-def spread_data_into_fields(model_class, instance):
+def spread_data_into_fields(model_class:type[Model], instance):
     """Called before save to DB, to put the fields of 'data' into proper fields."""
 
     if isinstance(instance, Model):
@@ -168,6 +169,12 @@ class EnumRegistry(Model):
         initial_mapping = {}
 
     @classmethod
+    def safe_create(cls, key:str, value:str):
+        db = cls._meta.database
+        cls.create(key=key, value=value)
+        db.commit()
+
+    @classmethod
     def _ensure_loaded(cls):
 
         if getattr(cls, "_loaded", False):
@@ -186,35 +193,35 @@ class EnumRegistry(Model):
             existing = {row.key: row.value for row in cls.select()}
 
             # Initial settings
-            with cls._meta.database.atomic():
-                for key, value in cls._meta.initial_mapping.items():
-                    if key in existing:
-                        continue
-                    cls.create(key=key, value=value).save()
-                    existing[key] = value
+            for key, value in cls._meta.initial_mapping.items():
+                if key in existing:
+                    continue
+                cls.safe_create(key=key, value=value)
+                existing[key] = value
 
             # Fill cache
-            for key, vaue in existing.items():
+            for key, value in existing.items():
                 cls._str_to_int[key] = value
                 cls._int_to_str[value] = key
 
             cls._loaded = True
 
+
+
     @classmethod
     def to_int(cls, key: str) -> int:
         cls._ensure_loaded()
+        if key in cls._str_to_int:
+            return cls._str_to_int[key]
 
         with cls._lock:
-            if key in cls._str_to_int:
-                return cls._str_to_int[key]
 
-            with cls._meta.database.atomic():
-                # New value => insert it into DB
-                value = max(cls._int_to_str.keys(), default=-1) + 1
-                cls.create(key=key, value=value).save()
-                cls._str_to_int[key] = value
-                cls._int_to_str[value] = key
-                return value
+            # New value => insert it into DB
+            value = max(cls._int_to_str.keys(), default=-1) + 1
+            cls.safe_create(key=key, value=value)
+            cls._str_to_int[key] = value
+            cls._int_to_str[value] = key
+            return value
 
     @classmethod
     def to_str(cls, value: int):

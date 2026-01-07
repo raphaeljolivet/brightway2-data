@@ -13,6 +13,7 @@ import pandas
 from bw_processing import Datapackage, clean_datapackage_name, create_datapackage
 from fsspec.implementations.zip import ZipFileSystem
 from peewee import JOIN, DoesNotExist, fn
+from sympy.physics.units import vacuum_impedance
 from tqdm import tqdm
 
 from bw2data import calculation_setups, config, databases, geomapping
@@ -45,10 +46,12 @@ from bw2data.logs import stdout_feedback_logger
 from bw2data.query import Query
 from bw2data.search import IndexManager, Searcher
 from bw2data.signals import on_database_reset, on_database_write
+from bw2data.snowflake_ids import snowflake_id_generator, snowflake_to_code
 from bw2data.utils import as_uncertainty_dict, get_geocollection, get_node, set_correct_process_type
 
 _VALID_KEYS = {"location", "name", "product", "type"}
 
+CHUNK_SIZE = 500
 
 def tqdm_wrapper(iterable, is_test):
     if is_test:
@@ -57,11 +60,10 @@ def tqdm_wrapper(iterable, is_test):
         return tqdm(iterable)
 
 
-def get_technosphere_qs(database_name: str, edge_types: Iterable[str]) -> Iterable:
+def generic_select(database_name: str, edge_types: Iterable[str]) -> Iterable:
     Source = ActivityDataset.alias()
     Target = ActivityDataset.alias()
-    return (
-        ExchangeDataset.select(
+    query = (ExchangeDataset.select(
             ExchangeDataset.type,
             ExchangeDataset.amount,
             ExchangeDataset.uncertainty_type,
@@ -71,8 +73,7 @@ def get_technosphere_qs(database_name: str, edge_types: Iterable[str]) -> Iterab
             ExchangeDataset.input_code,
             ExchangeDataset.output_database,
             ExchangeDataset.output_code,
-        )
-        .join(
+        ).join(
             Source,
             # Use a left join to get invalid edges and raise error
             join_type=JOIN.LEFT_OUTER,
@@ -94,24 +95,19 @@ def get_technosphere_qs(database_name: str, edge_types: Iterable[str]) -> Iterab
             (ExchangeDataset.output_database == database_name)
             & (ExchangeDataset.type << edge_types)
             & (Target.type << labels.process_node_types)
-        )
-        .tuples()
-        .iterator()
-    )
+        ))
 
+    # Use raw SQlite request (no need to go trough Peewee ORM here)
+    sql, params = query.sql()
+    res = ExchangeDataset._meta.database.execute_sql(sql, params).fetchall()
+    return res
 
-get_technosphere_positive_qs = partial(
-    get_technosphere_qs, edge_types=labels.technosphere_positive_edge_types
-)
-get_technosphere_negative_qs = partial(
-    get_technosphere_qs, edge_types=labels.technosphere_negative_edge_types
-)
+technosphere_positive_edges = set(labels.technosphere_positive_edge_types)
+technosphere_negative_edges = set(labels.technosphere_negative_edge_types)
+technosphere_edges = technosphere_negative_edges | technosphere_positive_edges
 
-get_biosphere_qs = partial(
-    get_technosphere_qs, edge_types=labels.biosphere_edge_types
-)
-
-
+get_biosphere_qs = partial(generic_select, edge_types=labels.biosphere_edge_types)
+get_technosphere_qs = partial(generic_select, edge_types=technosphere_edges)
 
 
 
@@ -549,6 +545,7 @@ class SQLiteBackend(ProcessedDataStore):
     def _drop_indices(self):
         with sqlite3_lci_db.transaction():
             sqlite3_lci_db.execute_sql('DROP INDEX IF EXISTS "activitydataset_key"')
+            sqlite3_lci_db.execute_sql('DROP INDEX IF EXISTS "activitydataset_type"')
             sqlite3_lci_db.execute_sql('DROP INDEX IF EXISTS "exchangedataset_input"')
             sqlite3_lci_db.execute_sql('DROP INDEX IF EXISTS "exchangedataset_output"')
 
@@ -558,58 +555,64 @@ class SQLiteBackend(ProcessedDataStore):
                 'CREATE UNIQUE INDEX IF NOT EXISTS "activitydataset_key" ON "activitydataset" ("database", "code")'
             )
             sqlite3_lci_db.execute_sql(
+                'CREATE INDEX IF NOT EXISTS "activitydataset_type" ON "activitydataset" ("type")'
+            )
+            sqlite3_lci_db.execute_sql(
                 'CREATE INDEX IF NOT EXISTS "exchangedataset_input" ON "exchangedataset" ("input_database", "input_code")'
             )
             sqlite3_lci_db.execute_sql(
                 'CREATE INDEX IF NOT EXISTS "exchangedataset_output" ON "exchangedataset" ("output_database", "output_code")'
             )
 
-    def _efficient_write_dataset(
+    def _efficient_write_datasets(
         self,
-        ds: dict,
-        exchanges: list,
-        activities: list,
+        datasets: list,
         check_typos: bool = True,
-    ) -> (list, list):
-        for exchange in ds.get("exchanges", []):
-            if "input" not in exchange or "amount" not in exchange:
-                raise InvalidExchange
-            if "type" not in exchange:
-                raise UntypedExchange
+        drop_meta_data= True):
+
+        # Extract all exchanges
+        exchanges = []
+        activities = []
+
+        for ds in datasets:
+
+            for exchange in ds.get("exchanges", []):
+                if "input" not in exchange or "amount" not in exchange:
+                    raise InvalidExchange
+                if "type" not in exchange:
+                    raise UntypedExchange
+
+                if check_typos:
+                    check_exchange_type(exchange.get("type"))
+                    check_exchange_keys(exchange)
+
+                if "output" not in exchange:
+                    exchange["output"] = (ds["database"], ds["code"])
+                exchanges.append(dict_as_exchangedataset(exchange))
+
+
+            # Extract activity without exchange
+            ds = {k: v for k, v in ds.items() if k != "exchanges"}
 
             if check_typos:
-                check_exchange_type(exchange.get("type"))
-                check_exchange_keys(exchange)
+                check_activity_type(ds.get("type"))
+                check_activity_keys(ds)
 
-            if "output" not in exchange:
-                exchange["output"] = (ds["database"], ds["code"])
-            exchanges.append(dict_as_exchangedataset(exchange))
+            activities.append(dict_as_activitydataset(ds, add_snowflake_id=True))
 
-            # Query gets passed as INSERT INTO x VALUES ('?', '?'...)
-            # SQLite3 has a limit of 999 variables,
-            # So 6 fields * 125 is under the limit
-            # Otherwise get the following:
-            # peewee.OperationalError: too many SQL variables
-            if len(exchanges) > 125:
-                insert_many_exchanges(exchanges)
-                exchanges = []
+        # Insert activities and exchanges for this chunk
+        insert_many_activities(activities, drop_meta_data=drop_meta_data)
+        insert_many_exchanges(exchanges, drop_meta_data=drop_meta_data)
 
-        ds = {k: v for k, v in ds.items() if k != "exchanges"}
-
-        if check_typos:
-            check_activity_type(ds.get("type"))
-            check_activity_keys(ds)
-
-        activities.append(dict_as_activitydataset(ds, add_snowflake_id=True))
-
-        if len(activities) > 125:
-            insert_many_activities(activities)
-            activities = []
-
-        return exchanges, activities
 
     def _efficient_write_many_data(
-        self, data: list, indices: bool = True, check_typos: bool = True
+        self,
+        data: list,
+        indices: bool = True,
+        check_typos: bool = True,
+        drop_meta_data = True,
+        vacuum =True
+
     ) -> None:
         be_complicated = len(data) >= 100 and indices
         if be_complicated:
@@ -618,19 +621,21 @@ class SQLiteBackend(ProcessedDataStore):
         try:
             sqlite3_lci_db.db.begin()
             self.delete(keep_params=True, warn=False, vacuum=False)
-            exchanges, activities = [], []
 
-            for ds in tqdm_wrapper(data, getattr(config, "is_test", False)):
-                exchanges, activities = self._efficient_write_dataset(
-                    ds, exchanges, activities, check_typos
-                )
+            # Split in chunks
+            for i in tqdm(range(0, len(data), CHUNK_SIZE), desc="Insert into database"):
+                chunk = data[i:i + CHUNK_SIZE]
 
-            if activities:
-                insert_many_activities(activities)
-            if exchanges:
-                insert_many_exchanges(exchanges)
+                self._efficient_write_datasets(
+                    datasets=chunk,
+                    check_typos=check_typos,
+                    drop_meta_data=drop_meta_data)
+
+
             sqlite3_lci_db.db.commit()
-            sqlite3_lci_db.vacuum()
+
+            if vacuum:
+                sqlite3_lci_db.vacuum()
         except:
             sqlite3_lci_db.db.rollback()
             raise
@@ -638,6 +643,7 @@ class SQLiteBackend(ProcessedDataStore):
             sqlite3_lci_db.db.autocommit = True
             if be_complicated:
                 self._add_indices()
+
 
     # Public API
 
@@ -647,9 +653,9 @@ class SQLiteBackend(ProcessedDataStore):
         process: bool = True,
         searchable: bool = True,
         check_typos: bool = False,
-        compact_codes = False,
-        signal: Optional[bool] = None,
-    ):
+        drop_meta_data: bool = True,
+        signal: Optional[bool] = None):
+
         """Write ``data`` to database.
 
         ``data`` must be a dictionary of the form::
@@ -676,6 +682,10 @@ class SQLiteBackend(ProcessedDataStore):
 
         if self.name not in databases:
             self.register(write_empty=False)
+
+        # Vacuum not needed if db was empty
+        vacuum = len(self) > 0
+
         wrong_database = {ds["database"] for ds in data}.difference({self.name})
         if wrong_database:
             raise WrongDatabase(
@@ -703,7 +713,11 @@ class SQLiteBackend(ProcessedDataStore):
         geomapping.add({x["location"] for x in data if x.get("location")})
         if data:
             try:
-                self._efficient_write_many_data(data, check_typos=check_typos)
+                self._efficient_write_many_data(
+                    data,
+                    check_typos=check_typos,
+                    drop_meta_data=drop_meta_data,
+                    vacuum=vacuum)
             except:
                 # Purge all data from database, then reraise
                 self.delete(warn=False, signal=signal)
@@ -921,7 +935,7 @@ Here are the type values usually used for nodes:
         if signal:
             on_database_reset.send(name=self.name)
 
-    def exchange_data_iterator(self, qs_func, dependents, flip=False):
+    def exchange_data_iterator(self, qs_func, dependents):
         """Iterate over exchanges and format for ``bw_processing`` arrays.
 
         ``dependents`` is a set of dependent database names.
@@ -955,7 +969,11 @@ Here are the type values usually used for nodes:
             # Modify ``dependents`` in place
             if input_database != output_database:
                 dependents.add(input_database)
-            check_exchange(data)
+
+            #check_exchange(data)
+
+            flip = (type in technosphere_negative_edges)
+
             if row is None or col is None:
                 raise UnknownObject(
                     (
@@ -1065,11 +1083,9 @@ Here are the type values usually used for nodes:
             matrix="technosphere_matrix",
             name=clean_datapackage_name(self.name + " technosphere matrix"),
             dict_iterator=itertools.chain(
-                self.exchange_data_iterator(get_technosphere_negative_qs, dependents, flip=True),
-                self.exchange_data_iterator(get_technosphere_positive_qs, dependents),
-                implicit_production,
-            ),
-        )
+                self.exchange_data_iterator(get_technosphere_qs, dependents),
+                implicit_production))
+
         if csv:
             df = pandas.DataFrame([get_csv_data_dict(ds) for ds in self])
             dp.add_csv_metadata(

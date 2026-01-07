@@ -1,9 +1,10 @@
 from functools import cache
 
-from peewee import DoesNotExist, TextField, FloatField, IntegerField
+from peewee import DoesNotExist, TextField, FloatField, IntegerField, Model, Function
 from playhouse.signals import pre_save, pre_init
 
-from bw2data.sqlite import CleanJSONField, spread_data_into_fields, add_field_into_data, EnumField, EnumRegistry
+from bw2data.sqlite import CleanJSONField, spread_data_into_fields, add_field_into_data, EnumField, EnumRegistry, FastJSONField, \
+    ListField
 from bw2data.errors import UnknownObject
 from bw2data.snowflake_ids import SnowflakeIDBaseClass
 
@@ -22,12 +23,15 @@ class TypeEnum(EnumRegistry):
 class ActivityDataset(SnowflakeIDBaseClass):
     data = CleanJSONField(default=dict)  # Set just after
     code = TextField()  # Canonical
-    database = EnumField(DatabaseEnum)
-    unit = EnumField(UnitEnum, null=True)
+    comment = TextField(null=True)
+    categories = ListField(null=True)
+    synonyms = ListField(null=True)
+    database = TextField() # EnumField(DatabaseEnum)
+    unit = TextField(null=True) # EnumField(UnitEnum, null=True)
     location = TextField(null=True)  # Reset from `data`
     name = TextField(null=True)  # Reset from `data`
     product = TextField(null=True)  # Reset from `data`
-    type = EnumField(TypeEnum, null=True)  # Reset from `data`
+    type = TextField(null=True) # EnumField(TypeEnum, null=True)  # Reset from `data`
 
     class Meta:
         extra_data_mapping = {"reference product": "product"}
@@ -49,14 +53,14 @@ class ExchangeDataset(SnowflakeIDBaseClass):
     minimum = FloatField(null=True)
     maximum = FloatField(null=True)
 
-    unit = EnumField(UnitEnum, null=True)
+    unit = TextField(null=True) # EnumField(UnitEnum, null=True)
 
     name= TextField(null=True)
     input_code = TextField()  # Canonical
-    input_database = EnumField(DatabaseEnum)  # Canonical
+    input_database = TextField() # EnumField(DatabaseEnum)
     output_code = TextField()  # Canonical
-    output_database = EnumField(DatabaseEnum)  # Canonical
-    type = EnumField(TypeEnum)  # Reset from `data`
+    output_database = TextField() # EnumField(DatabaseEnum)
+    type = TextField(null=True) # EnumField(TypeEnum, null=True)  # Reset from `data`
 
     class Meta:
         extra_data_mapping = {
@@ -103,17 +107,45 @@ def get_id(key):
             raise UnknownObject
 
 
-def insert_many_exchanges(exchanges : list[ExchangeDataset]):
-    """Signal don't work automatically on insery_many(). Do it manually"""
-    for exchange in exchanges:
-        exchange_pre_save(ExchangeDataset, exchange, False)
-    ExchangeDataset.insert_many(exchanges).execute()
+def insert_many(items, modelClass:type[Model], drop_meta_data=False):
+    """Generic insert many. Using raw sqlite connection with executemany > super fast"""
+
+    fields = modelClass._meta.sorted_fields
+
+    sql_rows = []
+    for item in items:
+        spread_data_into_fields(modelClass, item)
+        if drop_meta_data :
+            item["data"] = {}
+
+        def to_sql(field):
+            res = field.db_value(item.get(field.name))
+
+            # For some reason, JSON field returns a peewee json "Function"
+            if isinstance(res, Function):
+                res = res.arguments[0]
+            return res
+
+        # Yield single row
+        sql_rows.append(list(to_sql(field) for field in fields))
+
+    # Get raw sqlite connection
+    db = modelClass._meta.database
+    conn = db.connection()
+    cursor = conn.cursor()
+
+    column_names = [f'"{f.column_name}"' for f in fields]
+    placeholders = ", ".join(["?"] * len(fields))
+
+    sql = f"""INSERT INTO {modelClass._meta.table_name} ({", ".join(column_names)}) VALUES ({placeholders})"""
+
+    cursor.executemany(sql, sql_rows)
 
 
-def insert_many_activities(activities : list[ActivityDataset]):
-    """Signal don't work automatically on insery_many(). Do it manually"""
-    for activity in activities:
-        exchange_pre_save(ActivityDataset, activity, False)
-    ActivityDataset.insert_many(activities).execute()
+def insert_many_exchanges(exchanges : list[ExchangeDataset], drop_meta_data=False):
+    insert_many(exchanges, ExchangeDataset, drop_meta_data=drop_meta_data)
+
+def insert_many_activities(activities : list[ActivityDataset], drop_meta_data = False):
+    insert_many(activities, ActivityDataset, drop_meta_data=drop_meta_data)
 
 
