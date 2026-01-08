@@ -48,6 +48,9 @@ from bw2data.search import IndexManager, Searcher
 from bw2data.signals import on_database_reset, on_database_write
 from bw2data.snowflake_ids import snowflake_id_generator, snowflake_to_code
 from bw2data.utils import as_uncertainty_dict, get_geocollection, get_node, set_correct_process_type
+import pandas as pd
+import polars as pl
+import numpy as np
 
 _VALID_KEYS = {"location", "name", "product", "type"}
 
@@ -60,6 +63,14 @@ def tqdm_wrapper(iterable, is_test):
         return tqdm(iterable)
 
 
+def query_to_sql(query):
+    sql, params = query.sql()
+    for param in params:
+        if isinstance(param, str):
+            param = "'" + param.replace("'", "''") + "'"
+        sql = sql.replace('?', str(param), 1)
+    return sql
+
 def generic_select(database_name: str, edge_types: Iterable[str]) -> Iterable:
     Source = ActivityDataset.alias()
     Target = ActivityDataset.alias()
@@ -67,21 +78,20 @@ def generic_select(database_name: str, edge_types: Iterable[str]) -> Iterable:
             ExchangeDataset.type,
             ExchangeDataset.amount,
             ExchangeDataset.uncertainty_type,
-            Source.id,
-            Target.id,
-            ExchangeDataset.input_database,
-            ExchangeDataset.input_code,
-            ExchangeDataset.output_database,
-            ExchangeDataset.output_code,
-        ).join(
+            ExchangeDataset.shape,
+            ExchangeDataset.maximum,
+            ExchangeDataset.minimum,
+            ExchangeDataset.loc,
+            Source.id.alias("row"),
+            Target.id.alias("col"))
+        .join(
             Source,
             # Use a left join to get invalid edges and raise error
             join_type=JOIN.LEFT_OUTER,
             on=(
                 (ExchangeDataset.input_code == Source.code)
                 & (ExchangeDataset.input_database == Source.database)
-            ),
-        )
+            ))
         .switch(ExchangeDataset)
         .join(
             Target,
@@ -89,8 +99,7 @@ def generic_select(database_name: str, edge_types: Iterable[str]) -> Iterable:
             on=(
                 (ExchangeDataset.output_code == Target.code)
                 & (ExchangeDataset.output_database == Target.database)
-            ),
-        )
+            ))
         .where(
             (ExchangeDataset.output_database == database_name)
             & (ExchangeDataset.type << edge_types)
@@ -98,9 +107,30 @@ def generic_select(database_name: str, edge_types: Iterable[str]) -> Iterable:
         ))
 
     # Use raw SQlite request (no need to go trough Peewee ORM here)
-    sql, params = query.sql()
-    res = ExchangeDataset._meta.database.execute_sql(sql, params).fetchall()
-    return res
+
+    conn = ExchangeDataset._meta.database.connection()
+
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA cache_size=50000000;")
+
+    #sql, params = query.sql()
+    #return pd.read_sql(sql=sql, params=params, con=conn)
+
+    return pl.read_database(
+        query_to_sql(query),
+        connection=conn,
+        schema_overrides=dict(
+            type=pl.String,
+            amount=pl.Float32,
+            uncertainty_type=pl.Int8,
+            shape=pl.Float32,
+            maximum=pl.Float32,
+            minimum=pl.Float32,
+            loc=pl.Float32,
+            row=pl.Int64,
+            col=pl.Int64))
 
 technosphere_positive_edges = set(labels.technosphere_positive_edge_types)
 technosphere_negative_edges = set(labels.technosphere_negative_edge_types)
@@ -950,10 +980,6 @@ Here are the type values usually used for nodes:
                 uncertainty_type,
                 row,
                 col,
-                input_database,
-                input_code,
-                output_database,
-                output_code,
             ) = line
 
             # This simulate numerical info being nested in 'data'.
